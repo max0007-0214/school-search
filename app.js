@@ -1,5 +1,5 @@
 'use strict';
-const JS_VER='10';
+const JS_VER='11';
 let db;
 const $=id=>document.getElementById(id);
 const escapeHtml=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -30,62 +30,71 @@ function loadOcrLibrary(){
  return ocrLibraryPromise;
 }
 function importProgress(message){$('importStatus').textContent=message}
-async function ocrPdf(buffer,lib){
- importProgress('日本語OCRを準備中…初回は日本語認識データの取得に時間がかかります。');
+let ocrCancel=false;
+async function createOcrWorker(){
  const tess=await loadOcrLibrary();
- let worker,pdf,task;
- let recognized=0,nonempty=0,lines=[];
+ return tess.createWorker('jpn+eng',1,{
+  workerPath:'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js',
+  corePath:'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1',
+  langPath:'https://tessdata.projectnaptha.com/4.0.0',
+  logger:m=>{if(m.status==='recognizing text'&&typeof m.progress==='number'&&window.__ocrPage)importProgress(`日本語OCR：${window.__ocrPage}ページ・${Math.round(m.progress*100)}%`)}
+ });
+}
+function cancelButton(show){
+ let b=document.getElementById('cancelOcr');
+ if(!b){b=document.createElement('button');b.id='cancelOcr';b.className='small danger';b.textContent='読み込みを中止';b.onclick=()=>{ocrCancel=true;b.textContent='中止しています…'};$('importStatus').after(b)}
+ b.style.display=show?'':'none';if(show)b.textContent='読み込みを中止';
+}
+// ページ単位のハイブリッド抽出：文字が30字未満のページだけOCR（端末内Web Worker。本文・画像は外部送信しない）
+async function extractPdf(buffer){
+ const MIN_CHARS=30,RESET_EVERY=20;
+ const lib=await loadPdfLibrary();
+ lib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+ const mk=extra=>({data:new Uint8Array(buffer.slice(0)),useSystemFonts:true,cMapUrl:'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',cMapPacked:true,standardFontDataUrl:'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/standard_fonts/',...extra});
+ let task=lib.getDocument(mk({})),pdf;
+ try{pdf=await task.promise}catch(e){await task.destroy().catch(()=>{});task=lib.getDocument(mk({disableWorker:true}));try{pdf=await task.promise}catch(e2){throw Error('PDF解析失敗：'+e2.message)}}
+ let worker=null,sinceReset=0,textPages=0,ocrPages=0,chars=0,failed=[];const out=[];
+ ocrCancel=false;cancelButton(true);
  try{
-  worker=await tess.createWorker('jpn+eng',1,{
-   workerPath:'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js',
-   corePath:'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1',
-   langPath:'https://tessdata.projectnaptha.com/4.0.0',
-   logger:m=>{if(m.status==='recognizing text'&&typeof m.progress==='number'&&window.__ocrPage){importProgress(`日本語OCR：${window.__ocrPage}ページ目・${Math.round(m.progress*100)}%`)} }
-  });
-  task=lib.getDocument({data:new Uint8Array(buffer.slice(0)),useSystemFonts:true,cMapUrl:'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',cMapPacked:true,standardFontDataUrl:'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/standard_fonts/'});
-  pdf=await task.promise;
   for(let n=1;n<=pdf.numPages;n++){
-   window.__ocrPage=`${n}/${pdf.numPages}`;
-   importProgress(`日本語OCR：${n}/${pdf.numPages}ページを処理中。終了まで画面を閉じないでください。`);
+   if(ocrCancel)throw Error('中止しました。この資料は保存していません');
    let page,canvas;
    try{
     page=await pdf.getPage(n);
-    const original=page.getViewport({scale:1});
-    // 1ページずつ最大約180万画素に制限し、iPadのRAM使用量を抑える。
-    const scale=Math.min(1.8,Math.sqrt(1800000/(original.width*original.height)));
-    const viewport=page.getViewport({scale:Math.max(0.8,scale)});
-    canvas=document.createElement('canvas');
-    canvas.width=Math.ceil(viewport.width);canvas.height=Math.ceil(viewport.height);
-    const ctx=canvas.getContext('2d',{alpha:false});
-    if(!ctx)throw Error('画像描画領域を確保できません');
-    await page.render({canvasContext:ctx,viewport,background:'#ffffff'}).promise;
-    const result=await worker.recognize(canvas);
-    const text=result.data?.text||'';
-    recognized+=text.replace(/\s/g,'').length;
-    if(text.trim())nonempty++;
-    lines.push(`【${n}ページ】\n${text}`);
-   }catch(e){throw Error(`${n}ページ目でOCRに失敗しました：${e.message}`)}
-   finally{if(canvas){canvas.width=0;canvas.height=0;canvas=null}if(page)page.cleanup()}
-   // UIとブラウザーのGCに実行機会を渡す。
-   await new Promise(resolve=>setTimeout(resolve,0));
+    let txt='';
+    try{const c=await page.getTextContent();const ps=[];let lastY=null;for(const it of c.items){if(typeof it.str!=='string')continue;const y=it.transform?.[5];if(lastY!==null&&typeof y==='number'&&Math.abs(y-lastY)>3)ps.push('\n');ps.push(it.str);if(it.hasEOL)ps.push('\n');if(typeof y==='number')lastY=y}txt=ps.join('')}catch(e){}
+    const cnt=txt.replace(/\s/g,'').length;
+    let pageText=txt;
+    if(cnt>=MIN_CHARS){textPages++;chars+=cnt}
+    else{
+     window.__ocrPage=`${n}/${pdf.numPages}`;
+     importProgress(`日本語OCR：${n}/${pdf.numPages}ページ。画面を閉じないでください。`);
+     try{
+      if(worker&&sinceReset>=RESET_EVERY){await worker.terminate().catch(()=>{});worker=null;sinceReset=0}
+      if(!worker){importProgress('日本語OCRを準備中…初回は認識データの取得に時間がかかります。');worker=await createOcrWorker();sinceReset=0}
+      const o=page.getViewport({scale:1});
+      const sc=Math.max(0.8,Math.min(1.8,Math.sqrt(1800000/(o.width*o.height))));
+      const vp=page.getViewport({scale:sc});
+      canvas=document.createElement('canvas');canvas.width=Math.ceil(vp.width);canvas.height=Math.ceil(vp.height);
+      const ctx=canvas.getContext('2d',{alpha:false});if(!ctx)throw Error('描画領域を確保できません');
+      await page.render({canvasContext:ctx,viewport:vp,background:'#ffffff'}).promise;
+      const r=await worker.recognize(canvas);const ot=r.data?.text||'';
+      const oc=ot.replace(/\s/g,'').length;sinceReset++;
+      if(oc){ocrPages++;chars+=oc;pageText=(txt?txt+'\n':'')+ot}else if(!cnt)failed.push(n);
+      if(cnt)chars+=cnt;
+     }catch(e){if(ocrCancel)throw e;failed.push(n);if(cnt)chars+=cnt;if(worker){await worker.terminate().catch(()=>{});worker=null}}
+    }
+    out.push(`【${n}ページ】\n${pageText}`);
+   }finally{if(canvas){canvas.width=0;canvas.height=0}if(page)page.cleanup()}
+   await new Promise(r=>setTimeout(r,0));
   }
-  if(!recognized)throw Error('OCRでも文字を認識できませんでした。原本・既存データは変更していません');
-  return {text:lines.join('\n\n'),note:`日本語OCR：${pdf.numPages}ページ中${nonempty}ページ・${recognized}文字認識。誤認識がないか確認してください`};
+  const note=`PDF ${pdf.numPages}ページ：文字抽出${textPages}ページ・OCR${ocrPages}ページ`+(failed.length?`・認識できず${failed.length}ページ(${failed.slice(0,10).join(',')}${failed.length>10?'…':''})`:'')+`。OCRは誤認識があります`;
+  return {text:out.join('\n\n'),note};
  }finally{
-  window.__ocrPage=null;
-  if(pdf)await pdf.destroy().catch(()=>{});
-  else if(task)await task.destroy().catch(()=>{});
+  window.__ocrPage=null;cancelButton(false);
   if(worker)await worker.terminate().catch(()=>{});
+  await pdf.destroy().catch(()=>{});
  }
-}
-async function extractPdf(buffer){
- const lib=await loadPdfLibrary();
- lib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
- let a;
- try{a=await readPdfOnce(lib,buffer,true)}
- catch(e){try{a=await readPdfOnce(lib,buffer,false)}catch(e2){throw Error(`PDF解析失敗：${e2.message}`)}}
- if(a.chars>0)return {text:a.text,note:`PDF文字抽出：${a.pages}ページ中${a.nonemptyPages}ページ・${a.chars}文字（画像ページは未認識）`};
- return ocrPdf(buffer,lib);
 }
 function garbledPdf(d){return d.name?.toLowerCase().endsWith('.pdf')&&(d.note||'').includes('簡易対応')}
 async function markOldPdfs(){for(const d of await getAll('docs')){if(garbledPdf(d)){d.text='';d.note='旧版の簡易解析PDFです。原本を再登録してください。';await put('docs',d)}}}
@@ -110,7 +119,7 @@ async function versionDiag(){
   if(window.caches){const k=(await caches.keys()).filter(x=>x.startsWith('school-search-'));cache=k.join(',')||'なし'}
  }catch(e){}
  const html=window.__HTML_VER||'?';
- const ok=html===JS_VER&&cache==='school-search-v10';
- el.textContent=`画面v${html} / JS v${JS_VER} / ${sw} / キャッシュ ${cache} → `+(ok?'✅ 最新(v10)':'⚠ 不一致：一度アプリを完全に閉じて開き直してください');
+ const ok=html===JS_VER&&cache==='school-search-v11';
+ el.textContent=`画面v${html} / JS v${JS_VER} / ${sw} / キャッシュ ${cache} → `+(ok?'✅ 最新(v11)':'⚠ 不一致：一度アプリを完全に閉じて開き直してください');
 }
 versionDiag();
