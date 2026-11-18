@@ -15,7 +15,77 @@ async function extract(file){const ext=file.name.split('.').pop().toLowerCase();
 let pdfLibPromise;
 function loadPdfLibrary(){if(window.pdfjsLib)return Promise.resolve(window.pdfjsLib);if(!pdfLibPromise)pdfLibPromise=new Promise((resolve,reject)=>{const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';s.onload=()=>window.pdfjsLib?resolve(window.pdfjsLib):reject(Error('PDF解析プログラムが見つかりません'));s.onerror=()=>reject(Error('PDF解析プログラムを取得できません。初回はインターネット接続が必要です'));document.head.appendChild(s)}).catch(e=>{pdfLibPromise=null;throw e});return pdfLibPromise}
 async function readPdfOnce(lib,buffer,worker){const opts={data:new Uint8Array(buffer.slice(0)),useSystemFonts:true,disableFontFace:false,cMapUrl:'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',cMapPacked:true,standardFontDataUrl:'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/standard_fonts/'};if(!worker)opts.disableWorker=true;const task=lib.getDocument(opts);let pdf;try{pdf=await task.promise;let pages=[],chars=0,itemsTotal=0,nonemptyPages=0,imageOps=0,errors=[];for(let n=1;n<=pdf.numPages;n++){const page=await pdf.getPage(n);let content;try{content=await page.getTextContent({disableCombineTextItems:false,includeMarkedContent:false})}catch(e){errors.push(`${n}ページ:${e.message}`);continue}itemsTotal+=content.items.length;let parts=[],lastY=null;for(const item of content.items){if(typeof item.str!=='string')continue;const y=item.transform?.[5];if(lastY!==null&&typeof y==='number'&&Math.abs(y-lastY)>3)parts.push('\n');parts.push(item.str);if(item.hasEOL)parts.push('\n');if(typeof y==='number')lastY=y}const line=parts.join('');const count=line.replace(/\s/g,'').length;chars+=count;if(count)nonemptyPages++;pages.push(`【${n}ページ】\n${line}`);if(n<=3&&count===0){try{const ops=await page.getOperatorList();imageOps+=ops.fnArray.filter(op=>[lib.OPS.paintImageXObject,lib.OPS.paintInlineImageXObject,lib.OPS.paintJpegXObject,lib.OPS.paintImageMaskXObject].includes(op)).length}catch(e){errors.push(`画像判定:${e.message}`)}}page.cleanup()}return {text:pages.join('\n\n'),pages:pdf.numPages,chars,itemsTotal,nonemptyPages,imageOps,errors}}finally{if(pdf)await pdf.destroy();else await task.destroy().catch(()=>{})}}
-async function extractPdf(buffer){const lib=await loadPdfLibrary();lib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';let a,firstError='';try{a=await readPdfOnce(lib,buffer,true)}catch(e){firstError=e.message;try{a=await readPdfOnce(lib,buffer,false)}catch(e2){throw Error(`PDF解析失敗（通常:${firstError} / 代替:${e2.message}）`)}}if(a.chars===0&& !firstError){try{const retry=await readPdfOnce(lib,buffer,false);if(retry.chars>a.chars)a=retry}catch(e){firstError=e.message}}if(a.chars===0){const kind=a.itemsTotal===0?(a.imageOps?'画像中心のPDFの可能性':'文字命令が見つからないPDF'):'文字項目はあるが文字列が空';throw Error(`本文0字（${a.pages}ページ・文字項目${a.itemsTotal}件・先頭3ページの画像描画${a.imageOps}件）。判定:${kind}。${firstError?'補足:'+firstError+'。':''}iPadの文字選択は画像認識の可能性があります。原本は保存せず、既存データも変更しません。`)}return {text:a.text,note:`PDF解析：${a.pages}ページ中${a.nonemptyPages}ページ・${a.chars}文字抽出（画像内の文字は対象外）${a.errors.length?'／一部ページで解析エラー':''}`}}
+// OCRは端末内のWeb Workerで実行。PDF本文・画像を外部APIへ送信しない。
+let ocrLibraryPromise;
+function loadOcrLibrary(){
+ if(window.Tesseract)return Promise.resolve(window.Tesseract);
+ if(!ocrLibraryPromise)ocrLibraryPromise=new Promise((resolve,reject)=>{
+  const s=document.createElement('script');
+  s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+  s.onload=()=>window.Tesseract?resolve(window.Tesseract):reject(Error('OCRプログラムを初期化できません'));
+  s.onerror=()=>reject(Error('OCRプログラムを読み込めません。通信環境を確認してください'));
+  document.head.appendChild(s);
+ }).catch(e=>{ocrLibraryPromise=null;throw e});
+ return ocrLibraryPromise;
+}
+function importProgress(message){$('importStatus').textContent=message}
+async function ocrPdf(buffer,lib){
+ importProgress('日本語OCRを準備中…初回は日本語認識データの取得に時間がかかります。');
+ const tess=await loadOcrLibrary();
+ let worker,pdf,task;
+ let recognized=0,nonempty=0,lines=[];
+ try{
+  worker=await tess.createWorker('jpn+eng',1,{
+   workerPath:'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js',
+   corePath:'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1',
+   langPath:'https://tessdata.projectnaptha.com/4.0.0',
+   logger:m=>{if(m.status==='recognizing text'&&typeof m.progress==='number'&&window.__ocrPage){importProgress(`日本語OCR：${window.__ocrPage}ページ目・${Math.round(m.progress*100)}%`)} }
+  });
+  task=lib.getDocument({data:new Uint8Array(buffer.slice(0)),useSystemFonts:true,cMapUrl:'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',cMapPacked:true,standardFontDataUrl:'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/standard_fonts/'});
+  pdf=await task.promise;
+  for(let n=1;n<=pdf.numPages;n++){
+   window.__ocrPage=`${n}/${pdf.numPages}`;
+   importProgress(`日本語OCR：${n}/${pdf.numPages}ページを処理中。終了まで画面を閉じないでください。`);
+   let page,canvas;
+   try{
+    page=await pdf.getPage(n);
+    const original=page.getViewport({scale:1});
+    // 1ページずつ最大約180万画素に制限し、iPadのRAM使用量を抑える。
+    const scale=Math.min(1.8,Math.sqrt(1800000/(original.width*original.height)));
+    const viewport=page.getViewport({scale:Math.max(0.8,scale)});
+    canvas=document.createElement('canvas');
+    canvas.width=Math.ceil(viewport.width);canvas.height=Math.ceil(viewport.height);
+    const ctx=canvas.getContext('2d',{alpha:false});
+    if(!ctx)throw Error('画像描画領域を確保できません');
+    await page.render({canvasContext:ctx,viewport,background:'#ffffff'}).promise;
+    const result=await worker.recognize(canvas);
+    const text=result.data?.text||'';
+    recognized+=text.replace(/\s/g,'').length;
+    if(text.trim())nonempty++;
+    lines.push(`【${n}ページ】\n${text}`);
+   }catch(e){throw Error(`${n}ページ目でOCRに失敗しました：${e.message}`)}
+   finally{if(canvas){canvas.width=0;canvas.height=0;canvas=null}if(page)page.cleanup()}
+   // UIとブラウザーのGCに実行機会を渡す。
+   await new Promise(resolve=>setTimeout(resolve,0));
+  }
+  if(!recognized)throw Error('OCRでも文字を認識できませんでした。原本・既存データは変更していません');
+  return {text:lines.join('\n\n'),note:`日本語OCR：${pdf.numPages}ページ中${nonempty}ページ・${recognized}文字認識。誤認識がないか確認してください`};
+ }finally{
+  window.__ocrPage=null;
+  if(pdf)await pdf.destroy().catch(()=>{});
+  else if(task)await task.destroy().catch(()=>{});
+  if(worker)await worker.terminate().catch(()=>{});
+ }
+}
+async function extractPdf(buffer){
+ const lib=await loadPdfLibrary();
+ lib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+ let a;
+ try{a=await readPdfOnce(lib,buffer,true)}
+ catch(e){try{a=await readPdfOnce(lib,buffer,false)}catch(e2){throw Error(`PDF解析失敗：${e2.message}`)}}
+ if(a.chars>0)return {text:a.text,note:`PDF文字抽出：${a.pages}ページ中${a.nonemptyPages}ページ・${a.chars}文字（画像ページは未認識）`};
+ return ocrPdf(buffer,lib);
+}
 function garbledPdf(d){return d.name?.toLowerCase().endsWith('.pdf')&&(d.note||'').includes('簡易対応')}
 async function markOldPdfs(){for(const d of await getAll('docs')){if(garbledPdf(d)){d.text='';d.note='旧版の簡易解析PDFです。原本を再登録してください。';await put('docs',d)}}}
 $('files').addEventListener('change',async e=>{const files=[...e.target.files];let ok=0,fail=[];$('importStatus').textContent='読み込み中…';for(const f of files){try{const r=await extract(f);if(f.name.toLowerCase().endsWith('.pdf')&&!r.text.replace(/【\d+ページ】/g,'').trim())throw Error('PDF本文が空です');await put('docs',{id:f.name+'|'+f.size+'|'+f.lastModified,name:f.name,size:f.size,modified:f.lastModified,added:Date.now(),text:r.text,note:r.note});ok++}catch(err){fail.push(f.name+'：'+err.message)}}$('importStatus').textContent=`${ok}件保存しました。`+(fail.length?' 失敗: '+fail.join(' / '):'');e.target.value='';renderDocs()});
@@ -28,5 +98,5 @@ function download(name,content,type){const url=URL.createObjectURL(new Blob([con
 function calendarFile(x){const stamp=x.date.replaceAll('-','')+'T'+(x.time||'09:00').replace(':','')+'00',start=new Date(x.date+'T'+(x.time||'09:00')+':00'),end=new Date(start.getTime()+3600000),fmt=d=>{const z=n=>String(n).padStart(2,'0');return d.getFullYear()+z(d.getMonth()+1)+z(d.getDate())+'T'+z(d.getHours())+z(d.getMinutes())+'00'},esc=s=>String(s||'').replace(/\\/g,'\\\\').replace(/\n/g,'\\n').replace(/,/g,'\\,').replace(/;/g,'\\;');download('予定-'+x.date+'.ics',`BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//SchoolSearch//JP\r\nBEGIN:VEVENT\r\nUID:${x.id}@school-search.local\r\nDTSTAMP:${new Date().toISOString().replace(/[-:]/g,'').replace(/\.\d+/,'')}\r\nDTSTART:${stamp}\r\nDTEND:${fmt(end)}\r\nSUMMARY:${esc(x.title)}\r\nDESCRIPTION:${esc(x.note)}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n`,'text/calendar')}
 async function exportBackup(){download('校内資料検索バックアップ-'+new Date().toISOString().slice(0,10)+'.json',JSON.stringify({version:1,docs:await getAll('docs'),events:await getAll('events')}),'application/json')}
 $('restore').addEventListener('change',async e=>{try{if(!e.target.files.length)return;const data=JSON.parse(await e.target.files[0].text());if(data.version!==1||!Array.isArray(data.docs)||!Array.isArray(data.events))throw Error('対応していないバックアップです');if(!confirm(`資料${data.docs.length}件・予定${data.events.length}件を復元しますか？`))return;for(const d of data.docs)await put('docs',d);for(const x of data.events)await put('events',x);alert('復元しました');renderDocs();renderEvents()}catch(err){alert('復元失敗: '+err.message)}e.target.value=''});
-async function storageInfo(){$('storageStatus').textContent=`資料 ${(await getAll('docs')).length}件、予定 ${(await getAll('events')).length}件を保存中。`}
+async function storageInfo(){const docs=await getAll('docs'),events=await getAll('events');const bytes=new Blob([JSON.stringify({docs,events})]).size;const estimate=await navigator.storage?.estimate?.().catch(()=>null);$('storageStatus').textContent=`資料 ${docs.length}件、予定 ${events.length}件。保存データ概算 ${(bytes/1048576).toFixed(2)}MB`+(estimate?`／このサイトの使用量概算 ${(estimate.usage/1048576).toFixed(1)}MB`:'');}
 init().then(async()=>{await markOldPdfs();renderDocs();renderEvents();$('eventDate').value=new Date().toLocaleDateString('sv-SE');if('serviceWorker' in navigator&&location.protocol==='https:')navigator.serviceWorker.register('./sw.js').catch(()=>{})}).catch(e=>alert('端末内保存を利用できません: '+e.message));
