@@ -31,11 +31,12 @@ async function extractPdf(buffer){
  lib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
  const task=lib.getDocument({data:new Uint8Array(buffer),useSystemFonts:true,cMapUrl:'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',cMapPacked:true,standardFontDataUrl:'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/standard_fonts/'});
  const pdf=await task.promise;
- let pages=[],chars=0;
+ let pages=[],chars=0,itemsTotal=0,nonemptyPages=0;
  try{
   for(let n=1;n<=pdf.numPages;n++){
    const page=await pdf.getPage(n);
-   const content=await page.getTextContent();
+   const content=await page.getTextContent({disableCombineTextItems:false});
+   itemsTotal+=content.items.length;
    let parts=[],lastY=null;
    for(const item of content.items){
     if(typeof item.str!=='string')continue;
@@ -45,12 +46,12 @@ async function extractPdf(buffer){
     if(item.hasEOL)parts.push('\n');
     if(typeof y==='number')lastY=y;
    }
-   const line=parts.join('');chars+=line.replace(/\s/g,'').length;
+   const line=parts.join('');const pageChars=line.replace(/\s/g,'').length;chars+=pageChars;if(pageChars)nonemptyPages++;
    pages.push('【'+n+'ページ】\n'+line);
   }
  }finally{await pdf.destroy()}
- if(chars===0)throw Error('PDF本文を抽出できませんでした。画像PDFまたは文字マッピング未対応の可能性があります。保存しません。');
- return {text:pages.join('\n\n'),note:''};
+ if(chars===0)throw Error(`PDF本文を抽出できませんでした（${pdf.numPages}ページ・文字項目${itemsTotal}件・抽出文字0字）。iPadの文字選択が画像認識による場合もあります。保存しません。`);
+ return {text:pages.join('\n\n'),note:`PDF解析：${pdf.numPages}ページ中${nonemptyPages}ページ・${chars}文字抽出（画像内の文字は対象外）`};
 }
 function garbledPdf(d){return d.name?.toLowerCase().endsWith('.pdf') && (d.note||'').includes('簡易対応')}
 async function markOldPdfs(){let docs=await getAll('docs');for(const d of docs){if(garbledPdf(d)){d.text='';d.note='旧版でPDFを誤解析したため本文を非表示にしました。日本語検索は修正待ちです。';await put('docs',d)}}}
