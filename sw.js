@@ -1,31 +1,6 @@
-const CACHE = 'school-search-v09';
-const ASSETS = ['./', './index.html', './app.js?v=09', './manifest.webmanifest', './icon.svg'];
-self.addEventListener('install', event => {
-  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));
-  self.skipWaiting();
-});
-self.addEventListener('activate', event => {
-  event.waitUntil((async () => {
-    const keys = await caches.keys();
-    await Promise.all(keys.filter(key => key.startsWith('school-search-') && key !== CACHE).map(key => caches.delete(key)));
-    await self.clients.claim();
-  })());
-});
-self.addEventListener('fetch', event => {
-  const request = event.request;
-  if (request.method !== 'GET' || new URL(request.url).origin !== self.location.origin) return;
-  event.respondWith((async () => {
-    try {
-      const response = await fetch(request);
-      if (response.ok) {
-        const cache = await caches.open(CACHE);
-        await cache.put(request, response.clone());
-      }
-      return response;
-    } catch (error) {
-      const cached = await caches.match(request);
-      if (cached) return cached;
-      throw error;
-    }
-  })());
-});
+const CACHE='school-search-v10';
+const ASSETS=['./','./index.html','./app.js?v=10','./manifest.webmanifest','./icon.svg'];
+self.addEventListener('install',e=>{e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS.map(u=>new Request(u,{cache:'reload'})))));self.skipWaiting()});
+self.addEventListener('activate',e=>{e.waitUntil((async()=>{for(const k of await caches.keys())if(k.startsWith('school-search-')&&k!==CACHE)await caches.delete(k);await self.clients.claim()})())});
+self.addEventListener('fetch',e=>{const r=e.request;if(r.method!=='GET'||new URL(r.url).origin!==self.location.origin)return;
+e.respondWith((async()=>{try{const res=await fetch(r,{cache:'no-cache'});if(res.ok){(await caches.open(CACHE)).put(r,res.clone())}return res}catch(err){const c=await caches.match(r,{ignoreSearch:false})||await caches.match(r,{ignoreSearch:true});if(c)return c;throw err}})())});

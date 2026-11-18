@@ -1,4 +1,5 @@
 'use strict';
+const JS_VER='10';
 let db;
 const $=id=>document.getElementById(id);
 const escapeHtml=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -100,3 +101,16 @@ async function exportBackup(){download('校内資料検索バックアップ-'+n
 $('restore').addEventListener('change',async e=>{try{if(!e.target.files.length)return;const data=JSON.parse(await e.target.files[0].text());if(data.version!==1||!Array.isArray(data.docs)||!Array.isArray(data.events))throw Error('対応していないバックアップです');if(!confirm(`資料${data.docs.length}件・予定${data.events.length}件を復元しますか？`))return;for(const d of data.docs)await put('docs',d);for(const x of data.events)await put('events',x);alert('復元しました');renderDocs();renderEvents()}catch(err){alert('復元失敗: '+err.message)}e.target.value=''});
 async function storageInfo(){const docs=await getAll('docs'),events=await getAll('events');const bytes=new Blob([JSON.stringify({docs,events})]).size;const estimate=await navigator.storage?.estimate?.().catch(()=>null);$('storageStatus').textContent=`資料 ${docs.length}件、予定 ${events.length}件。保存データ概算 ${(bytes/1048576).toFixed(2)}MB`+(estimate?`／このサイトの使用量概算 ${(estimate.usage/1048576).toFixed(1)}MB`:'');}
 init().then(async()=>{await markOldPdfs();renderDocs();renderEvents();$('eventDate').value=new Date().toLocaleDateString('sv-SE');if('serviceWorker' in navigator&&location.protocol==='https:')navigator.serviceWorker.register('./sw.js').catch(()=>{})}).catch(e=>alert('端末内保存を利用できません: '+e.message));
+
+async function versionDiag(){
+ const el=document.getElementById('verDiag');if(!el)return;
+ let sw='SW未使用',cache='なし';
+ try{
+  if('serviceWorker' in navigator){const r=await navigator.serviceWorker.getRegistration();sw=r&&r.active?'SW有効':'SW未登録'}
+  if(window.caches){const k=(await caches.keys()).filter(x=>x.startsWith('school-search-'));cache=k.join(',')||'なし'}
+ }catch(e){}
+ const html=window.__HTML_VER||'?';
+ const ok=html===JS_VER&&cache==='school-search-v10';
+ el.textContent=`画面v${html} / JS v${JS_VER} / ${sw} / キャッシュ ${cache} → `+(ok?'✅ 最新(v10)':'⚠ 不一致：一度アプリを完全に閉じて開き直してください');
+}
+versionDiag();
