@@ -1,10 +1,10 @@
 'use strict';
-const JS_VER='19';
+const JS_VER='20';
 let db;
 const $=id=>document.getElementById(id);
 const escapeHtml=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function showTab(t){if(t==='ask')refreshAskDocs();for(const x of ['docs','events','help','ask']){$(x).classList.toggle('hide',x!==t);$('tab'+x[0].toUpperCase()+x.slice(1)).classList.toggle('active',x===t)}if(t==='help')storageInfo();if(t==='ask')showApiState()}
-function init(){return new Promise((resolve,reject)=>{const r=indexedDB.open('school-search-local-v1',2);r.onupgradeneeded=()=>{const d=r.result;if(!d.objectStoreNames.contains('docs'))d.createObjectStore('docs',{keyPath:'id'});if(!d.objectStoreNames.contains('events'))d.createObjectStore('events',{keyPath:'id'});if(!d.objectStoreNames.contains('files'))d.createObjectStore('files',{keyPath:'id'})};r.onblocked=()=>alert('このアプリが他のウィンドウで開かれています。すべて閉じてから開き直してください。');r.onsuccess=()=>{db=r.result;db.onversionchange=()=>db.close();resolve()};r.onerror=()=>reject(r.error)})}
+function init(){return new Promise((resolve,reject)=>{const r=indexedDB.open('school-search-local-v1',3);r.onupgradeneeded=()=>{const d=r.result;if(!d.objectStoreNames.contains('docs'))d.createObjectStore('docs',{keyPath:'id'});if(!d.objectStoreNames.contains('events'))d.createObjectStore('events',{keyPath:'id'});if(!d.objectStoreNames.contains('files'))d.createObjectStore('files',{keyPath:'id'});if(!d.objectStoreNames.contains('boxes'))d.createObjectStore('boxes',{keyPath:'id'})};r.onblocked=()=>alert('このアプリが他のウィンドウで開かれています。すべて閉じてから開き直してください。');r.onsuccess=()=>{db=r.result;db.onversionchange=()=>db.close();resolve()};r.onerror=()=>reject(r.error)})}
 function store(name,mode='readonly'){return db.transaction(name,mode).objectStore(name)}
 function getAll(name){return new Promise((resolve,reject)=>{const r=store(name).getAll();r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)})}
 function put(name,obj){return new Promise((resolve,reject)=>{const r=store(name,'readwrite').put(obj);r.onsuccess=()=>resolve();r.onerror=()=>reject(r.error)})}
@@ -118,7 +118,7 @@ async function renderDocs(){if(!db)return;if($('bodyToggle'))$('bodyToggle').tex
  const head=!ws.length?`${docs.length}件表示 / 保存済み${docs.length}件`:total?`<b>${total}件ヒット</b>（完全一致${exact.length}件・あいまい一致${fuzzy.length}件）/ 保存済み${docs.length}件`:`<b>ヒットなし</b>（保存済み${docs.length}件）`;
  $('docsList').innerHTML=`<p class="hint">${head}</p>`+exact.map(card).join('')+(fuzzy.length?`<p class="hint">▼ あいまい一致（OCRの誤字を含む可能性。【】が一致した箇所）</p>`+fuzzy.map(card).join(''):'');
 }
-$('docsList').addEventListener('click',async e=>{const b=e.target.closest('button[data-action]');if(!b)return;const id=b.dataset.id,act=b.dataset.action;if(act==='attach'){startAttach(id);return}if(act==='orig'){openOriginal(id,+b.dataset.page||1,b.dataset.hits,$('query').value.trim().split(/\s+/).filter(Boolean));return}if(act==='delete'){if(confirm('この資料を削除しますか？（保存した原本も削除されます）')){await del('docs',id);await del('files',id).catch(()=>{});renderDocs()}return}const r=store('docs').get(id);r.onsuccess=()=>{const d=r.result;if(d)alert((d.text||d.note||'本文なし').slice(0,12000))}});
+$('docsList').addEventListener('click',async e=>{const b=e.target.closest('button[data-action]');if(!b)return;const id=b.dataset.id,act=b.dataset.action;if(act==='attach'){startAttach(id);return}if(act==='orig'){openOriginal(id,+b.dataset.page||1,b.dataset.hits,$('query').value.trim().split(/\s+/).filter(Boolean));return}if(act==='delete'){if(confirm('この資料を削除しますか？（保存した原本も削除されます）')){await del('docs',id);await del('files',id).catch(()=>{});await delBoxes(id);renderDocs()}return}const r=store('docs').get(id);r.onsuccess=()=>{const d=r.result;if(d)alert((d.text||d.note||'本文なし').slice(0,12000))}});
 async function addEvent(){const date=$('eventDate').value,title=$('eventTitle').value.trim();if(!date||!title){$('eventStatus').textContent='日付と予定名を入力してください';return}await put('events',{id:crypto.randomUUID(),date,time:$('eventTime').value,title,note:$('eventNote').value});$('eventStatus').textContent='保存しました';$('eventTitle').value='';$('eventNote').value='';renderEvents()}
 async function renderEvents(){if(!db)return;const q=$('eventQuery').value.trim().toLowerCase(),all=await getAll('events');evCache=all.slice();all.sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time));$('eventsList').innerHTML=all.filter(x=>(x.date+' '+x.title+' '+x.note).toLowerCase().includes(q)).map(x=>`<div class="item"><div class="name">${escapeHtml(x.date)} ${escapeHtml(x.time)}　${escapeHtml(x.title)}</div><div class="snippet">${escapeHtml(x.note)}</div><div class="row"><button class="small" data-action="calendar" data-id="${escapeHtml(x.id)}">カレンダーに追加</button><button class="small danger" data-action="delete" data-id="${escapeHtml(x.id)}">削除</button></div></div>`).join('')||'<p class="hint">予定はありません。</p>'}
 $('eventsList').addEventListener('click',async e=>{const b=e.target.closest('button[data-action]');if(!b)return;const r=store('events').get(b.dataset.id);r.onsuccess=async()=>{const x=r.result;if(!x)return;if(b.dataset.action==='delete'){if(confirm('予定を削除しますか？')){await del('events',x.id);renderEvents()}}else calendarFile(x)}});
@@ -324,7 +324,7 @@ async function openOriginal(id,page,hits,words){
   await viewerClose(true);
   $('viewer').classList.remove('hide');document.body.style.overflow='hidden';
   $('vname').textContent=rec.name;$('vpage').textContent='読み込み中…';
-  vDocId=id;vAi=(doc&&doc.aiPages)||{};vPageTexts={};vHits=String(hits||'').split(',').map(Number).filter(n=>n>0).sort((a,b)=>a-b);vWords=(words||[]).map(w=>String(w)).filter(Boolean);
+  vHlPage=0;vDocId=id;vAi=(doc&&doc.aiPages)||{};vPageTexts={};vHits=String(hits||'').split(',').map(Number).filter(n=>n>0).sort((a,b)=>a-b);vWords=(words||[]).map(w=>String(w)).filter(Boolean);
   $('vprevhit').classList.toggle('hide',!vHits.length);$('vnexthit').classList.toggle('hide',!vHits.length);
   if(doc&&doc.text){const parts=doc.text.split(/【(\d+)ページ】/);for(let i=1;i+1<parts.length;i+=2)vPageTexts[+parts[i]]=parts[i+1].trim()}
   const mk=extra=>({data:new Uint8Array(rec.data.slice(0)),...pdfBase(),...extra});
@@ -345,10 +345,12 @@ async function viewerRender(){
  const px=base.width*base.height*rs*rs;if(px>14e6)rs*=Math.sqrt(14e6/px);
  const vp=page.getViewport({scale:rs}),cv=$('vcanvas');
  cv.width=Math.ceil(vp.width);cv.height=Math.ceil(vp.height);
- cv.style.width=Math.round(base.width*css)+'px';cv.style.height=Math.round(base.height*css)+'px';
+ cv.style.width=Math.round(base.width*css)+'px';cv.style.height=Math.round(base.height*css)+'px';$('vwrap').style.width=cv.style.width;$('vwrap').style.height=cv.style.height;
+ if(vHlPage!==vPage)clearHL();
  const ctx=cv.getContext('2d',{alpha:false});
  vTask=page.render({canvasContext:ctx,viewport:vp,background:'#ffffff'});
  try{await vTask.promise}catch(e){if(e&&e.name==='RenderingCancelledException')return;throw e}
+ if(vHlPage!==vPage){vHlPage=vPage;highlightPage()}
  $('vpage').textContent=`${vPage} / ${vPdf.numPages}ページ`+(vHits.length?`（該当${vHits.length}ページ${vHits.includes(vPage)?'・このページに該当':''}）`:'');$('vgo').value=vPage;
  renderVText();$('vaistatus').textContent=vAiBusy?$('vaistatus').textContent:'';
  sc.scrollTop=0;$('vleft').scrollTop=0;
@@ -360,6 +362,7 @@ function viewerJump(v){if(!vPdf)return;const n=Math.min(Math.max(1,parseInt(v,10
 function viewerZoom(d){if(!vPdf)return;const n=Math.min(Math.max(0,vZoom+d),ZOOMS.length-1);if(n!==vZoom){vZoom=n;viewerRender().catch(e=>alert('表示できませんでした：'+e.message))}}
 function viewerText(){if($('viewer').classList.contains('split'))return;const t=$('vtext');t.classList.toggle('hide');if(!t.classList.contains('hide'))t.scrollIntoView({block:'start'})}
 async function viewerClose(silent){
+ vHlTok++;if(vWorker){vWorker.terminate().catch(()=>{});vWorker=null}clearHL();
  if(vTask){try{vTask.cancel()}catch(e){}vTask=null}
  if(vPdf){await vPdf.destroy().catch(()=>{});vPdf=null}
  const cv=$('vcanvas');if(cv){cv.width=0;cv.height=0}
@@ -514,6 +517,88 @@ async function exportIcs(){
  download(name,text,'text/calendar');st.textContent=info+' 保存したファイルを開き、「すべてを追加」を押してください。';
 }
 
+// ===== v20: 原本の画像上に、検索語をハイライト =====
+// ==HL-START==
+function matchRects(chars,words,W,H){
+ let full='';const map=[];
+ for(let i=0;i<chars.length;i++){const n=nk(chars[i].t).toLowerCase().replace(/\s+/g,'');for(const ch of n){full+=ch;map.push(i)}}
+ const out=[],seen=new Set();
+ for(const w of words){
+  const pos=[];let i=-1;
+  while(pos.length<40&&(i=full.indexOf(w,i+1))>=0)pos.push(i);
+  if(!pos.length&&w.length>=4){const mm=w.length>=7?2:1;for(let s=0;s+w.length<=full.length&&pos.length<40;s++){let m=0;for(let j=0;j<w.length;j++){if(full.charCodeAt(s+j)!==w.charCodeAt(j)&&++m>mm)break}if(m<=mm){pos.push(s);s+=w.length-1}}}
+  for(const s of pos){
+   const idx=[...new Set(map.slice(s,s+w.length))];let grp=[],last=null;
+   const flush=()=>{if(!grp.length)return;const x0=Math.min(...grp.map(c=>c.x0)),y0=Math.min(...grp.map(c=>c.y0)),x1=Math.max(...grp.map(c=>c.x1)),y1=Math.max(...grp.map(c=>c.y1)),k=[x0|0,y0|0,x1|0,y1|0].join();if(!seen.has(k)){seen.add(k);out.push({x:Math.max(0,x0-1)/W,y:Math.max(0,y0-1)/H,w:(x1-x0+2)/W,h:(y1-y0+2)/H})}grp=[]};
+   for(const ci of idx){const c=chars[ci];if(last&&Math.abs((c.y0+c.y1)/2-(last.y0+last.y1)/2)>0.6*(last.y1-last.y0))flush();grp.push(c);last=c}
+   flush();
+  }
+  if(out.length>200)break;
+ }
+ return out;
+}
+function ocrChars(data){
+ let words=data&&data.words;
+ if(!words||!words.length){words=[];for(const b of (data&&data.blocks)||[])for(const pg of b.paragraphs||[])for(const ln of pg.lines||[])for(const w of ln.words||[])words.push(w)}
+ const chars=[];
+ for(const w of words){
+  const bb=w.bbox;if(!bb)continue;
+  if(w.symbols&&w.symbols.length){for(const s of w.symbols)if(s.bbox&&s.text)chars.push({t:s.text,x0:s.bbox.x0,y0:s.bbox.y0,x1:s.bbox.x1,y1:s.bbox.y1})}
+  else{const arr=[...String(w.text||'')],n=arr.length||1,cw=(bb.x1-bb.x0)/n;arr.forEach((ch,k)=>chars.push({t:ch,x0:bb.x0+cw*k,y0:bb.y0,x1:bb.x0+cw*(k+1),y1:bb.y1}))}
+ }
+ return chars;
+}
+async function textLayerChars(page){
+ const vp=page.getViewport({scale:1}),tc=await page.getTextContent(),chars=[];
+ for(const it of tc.items){
+  if(typeof it.str!=='string'||!it.str.length)continue;
+  const t=it.transform;if(!t||Math.abs(t[1])>0.01||Math.abs(t[2])>0.01)continue;
+  const h=it.height||Math.abs(t[3])||10,arr=[...it.str],n=arr.length,cw=(it.width||h*n)/n;
+  arr.forEach((ch,k)=>{const x=t[4]+cw*k,r=vp.convertToViewportRectangle([x,t[5]-0.2*h,x+cw,t[5]+h]);chars.push({t:ch,x0:Math.min(r[0],r[2]),y0:Math.min(r[1],r[3]),x1:Math.max(r[0],r[2]),y1:Math.max(r[1],r[3])})});
+ }
+ return {chars,w:vp.width,h:vp.height};
+}
+// ==HL-END==
+let vHlPage=0,vHlTok=0,vWorker=null;
+function clearHL(){const o=$('vover');if(o)o.innerHTML='';const s=$('vhlstatus');if(s)s.textContent=''}
+function drawHL(rects){
+ $('vover').innerHTML=rects.map(r=>`<i style="left:${r.x*100}%;top:${r.y*100}%;width:${r.w*100}%;height:${r.h*100}%"></i>`).join('');
+ const sc=$('viewer').classList.contains('split')?$('vleft'):$('vscroll');
+ sc.scrollTop=Math.max(0,rects[0].y*$('vwrap').clientHeight-120);
+}
+function getBoxes(id,p){return new Promise(res=>{try{const r=store('boxes').get(id+'#'+p);r.onsuccess=()=>res(r.result||null);r.onerror=()=>res(null)}catch(e){res(null)}})}
+function delBoxes(id){return new Promise(res=>{try{const r=store('boxes').delete(IDBKeyRange.bound(id+'#',id+'#\uffff'));r.onsuccess=()=>res();r.onerror=()=>res()}catch(e){res()}})}
+async function ocrBoxes(page){
+ const o=page.getViewport({scale:1}),sc=Math.max(1,Math.min(3.5,Math.sqrt(4500000/(o.width*o.height)))),vp=page.getViewport({scale:sc});
+ const cv=document.createElement('canvas');cv.width=Math.ceil(vp.width);cv.height=Math.ceil(vp.height);
+ const ctx=cv.getContext('2d',{alpha:false});
+ await page.render({canvasContext:ctx,viewport:vp,background:'#ffffff'}).promise;
+ try{enhance(ctx,cv.width,cv.height)}catch(e){}
+ if(!vWorker){window.__ocrPage=null;vWorker=await createOcrWorker()}
+ const r=await vWorker.recognize(cv,{},{blocks:true,text:true}),W=cv.width,H=cv.height;cv.width=0;cv.height=0;
+ return {w:W,h:H,chars:ocrChars(r.data)};
+}
+async function highlightPage(){
+ clearHL();
+ if(!vWords.length||!vPdf)return;
+ const tok=++vHlTok,p=vPage,st=$('vhlstatus'),id=vDocId,
+  words=vWords.map(w=>nk(w).toLowerCase().replace(/\s+/g,'')).filter(Boolean);
+ if(!words.length)return;
+ const done=(rects,label)=>{if(tok!==vHlTok)return;if(rects.length){drawHL(rects);st.textContent=`ハイライト${rects.length}か所${label||''}`}else st.textContent='このページでは、検索語の位置を特定できませんでした（読み取りの誤りの可能性があります）。'};
+ try{
+  const page=await vPdf.getPage(p),tl=await textLayerChars(page);
+  if(tok!==vHlTok)return;
+  if(tl.chars.length>=30){done(matchRects(tl.chars,words,tl.w,tl.h));return}
+  let rec=await getBoxes(id,p);
+  if(!rec){
+   st.textContent='検索語の位置を調べています…（初回は数十秒かかります。ページは見られます）';
+   rec=await ocrBoxes(page);
+   try{await put('boxes',{id:id+'#'+p,...rec})}catch(e){}
+  }
+  done(matchRects(rec.chars,words,rec.w,rec.h),'（画像の読み取りによる位置）');
+ }catch(e){if(tok===vHlTok)st.textContent='ハイライトできませんでした：'+(e&&e.message||e)}
+}
+
 async function versionDiag(){
  const el=document.getElementById('verDiag');if(!el)return;
  let sw='SW未使用',cache='なし';
@@ -522,7 +607,7 @@ async function versionDiag(){
   if(window.caches){const k=(await caches.keys()).filter(x=>x.startsWith('school-search-'));cache=k.join(',')||'なし'}
  }catch(e){}
  const html=window.__HTML_VER||'?';
- const ok=html===JS_VER&&cache==='school-search-v19';
- el.textContent=`画面v${html} / JS v${JS_VER} / ${sw} / キャッシュ ${cache} → `+(ok?'✅ 最新(v19)':'⚠ 不一致：一度アプリを完全に閉じて開き直してください');
+ const ok=html===JS_VER&&cache==='school-search-v20';
+ el.textContent=`画面v${html} / JS v${JS_VER} / ${sw} / キャッシュ ${cache} → `+(ok?'✅ 最新(v20)':'⚠ 不一致：一度アプリを完全に閉じて開き直してください');
 }
 versionDiag();
