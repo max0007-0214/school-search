@@ -1,5 +1,5 @@
 'use strict';
-const JS_VER='17';
+const JS_VER='18';
 let db;
 const $=id=>document.getElementById(id);
 const escapeHtml=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -273,13 +273,14 @@ async function copyAskPrompt(){
 const monthKey=()=>'ss_api_cnt_'+new Date().toISOString().slice(0,7);
 function showApiState(){
  const k=localStorage.getItem('ss_api_key')||'';
- $('apiState').textContent=(k?`キー保存済み（末尾 ${k.slice(-4)}）`:'キー未設定')+` ／ 今月の送信回数：${localStorage.getItem(monthKey())||0}回`;
- $('apiModel').value=localStorage.getItem('ss_api_model')||'claude-haiku-5-5';
+ $('apiState').textContent=(k?`キー保存済み（末尾 ${k.slice(-4)}）`:'キー未設定')+` ／ 今月の送信回数：${localStorage.getItem(monthKey())||0}回`+tokText();
+ $('apiModel').value=localStorage.getItem('ss_api_model')||'claude-haiku-5-5';$('apiModelV').value=localStorage.getItem('ss_api_model_vision')||'';
 }
 function saveApiSettings(){
  const k=$('apiKey').value.trim(),m=$('apiModel').value.trim();
  if(k)localStorage.setItem('ss_api_key',k);
  if(m)localStorage.setItem('ss_api_model',m);
+ const mv=$('apiModelV').value.trim();if(mv)localStorage.setItem('ss_api_model_vision',mv);else localStorage.removeItem('ss_api_model_vision');
  $('apiKey').value='';showApiState();
 }
 function clearApiKey(){localStorage.removeItem('ss_api_key');showApiState()}
@@ -297,7 +298,7 @@ async function askApi(){
   if(!res.ok){const msg=data?.error?.message||('エラー '+res.status);$('askAnswer').textContent=(res.status===401?'APIキーが正しくありません。':res.status===429?'利用制限に達しました。しばらくしてからやり直してください。':'送信できませんでした。')+'\n'+msg;return}
   const txt=(data.content||[]).filter(x=>x.type==='text').map(x=>x.text).join('\n');
   $('askAnswer').textContent=txt||'（回答が空でした）';
-  localStorage.setItem(monthKey(),String((+localStorage.getItem(monthKey())||0)+1));showApiState();
+  bumpCount();addTokens((data.usage||{}).input_tokens||0,(data.usage||{}).output_tokens||0);showApiState();
  }catch(e){$('askAnswer').textContent=e.name==='AbortError'?'60秒以内に回答がなく、中止しました。':'通信できませんでした：'+e.message}
  finally{clearTimeout(to)}
 }
@@ -323,7 +324,7 @@ async function openOriginal(id,page,hits,words){
   await viewerClose(true);
   $('viewer').classList.remove('hide');document.body.style.overflow='hidden';
   $('vname').textContent=rec.name;$('vpage').textContent='読み込み中…';
-  vPageTexts={};vHits=String(hits||'').split(',').map(Number).filter(n=>n>0).sort((a,b)=>a-b);vWords=(words||[]).map(w=>String(w)).filter(Boolean);
+  vDocId=id;vAi=(doc&&doc.aiPages)||{};vPageTexts={};vHits=String(hits||'').split(',').map(Number).filter(n=>n>0).sort((a,b)=>a-b);vWords=(words||[]).map(w=>String(w)).filter(Boolean);
   $('vprevhit').classList.toggle('hide',!vHits.length);$('vnexthit').classList.toggle('hide',!vHits.length);
   if(doc&&doc.text){const parts=doc.text.split(/【(\d+)ページ】/);for(let i=1;i+1<parts.length;i+=2)vPageTexts[+parts[i]]=parts[i+1].trim()}
   const mk=extra=>({data:new Uint8Array(rec.data.slice(0)),...pdfBase(),...extra});
@@ -339,7 +340,7 @@ async function viewerRender(){
  if(!vPdf)return;
  if(vTask){try{vTask.cancel()}catch(e){}}
  const page=await vPdf.getPage(vPage),base=page.getViewport({scale:1}),sc=$('vscroll');
- const fit=Math.max(300,sc.clientWidth-16)/base.width,css=fit*ZOOMS[vZoom];
+ const fit=Math.max(300,availW()-16)/base.width,css=fit*ZOOMS[vZoom];
  let rs=css*Math.min(window.devicePixelRatio||1,2);
  const px=base.width*base.height*rs*rs;if(px>14e6)rs*=Math.sqrt(14e6/px);
  const vp=page.getViewport({scale:rs}),cv=$('vcanvas');
@@ -349,15 +350,15 @@ async function viewerRender(){
  vTask=page.render({canvasContext:ctx,viewport:vp,background:'#ffffff'});
  try{await vTask.promise}catch(e){if(e&&e.name==='RenderingCancelledException')return;throw e}
  $('vpage').textContent=`${vPage} / ${vPdf.numPages}ページ`+(vHits.length?`（該当${vHits.length}ページ${vHits.includes(vPage)?'・このページに該当':''}）`:'');$('vgo').value=vPage;
- $('vtext').innerHTML=vPageTexts[vPage]?hlText(vPageTexts[vPage]):'（このページの読み取り文字はありません）';
- sc.scrollTop=0;
+ renderVText();$('vaistatus').textContent=vAiBusy?$('vaistatus').textContent:'';
+ sc.scrollTop=0;$('vleft').scrollTop=0;
 }
 function hlText(text){let h=escapeHtml(String(text).normalize('NFKC'));for(const w of vWords){const ww=escapeHtml(String(w).normalize('NFKC'));if(!ww)continue;h=h.replace(new RegExp(ww.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'gi'),'<mark>$&</mark>')}return h}
 function viewerHit(d){if(!vPdf||!vHits.length)return;let n=null;if(d>0)n=vHits.find(p=>p>vPage)??vHits[0];else{const lo=vHits.filter(p=>p<vPage);n=lo.length?lo[lo.length-1]:vHits[vHits.length-1]}vPage=n;viewerRender().catch(e=>alert('表示できませんでした：'+e.message))}
 function viewerGo(d){if(!vPdf)return;const n=Math.min(Math.max(1,vPage+d),vPdf.numPages);if(n!==vPage){vPage=n;viewerRender().catch(e=>alert('表示できませんでした：'+e.message))}}
 function viewerJump(v){if(!vPdf)return;const n=Math.min(Math.max(1,parseInt(v,10)||1),vPdf.numPages);vPage=n;viewerRender().catch(e=>alert('表示できませんでした：'+e.message))}
 function viewerZoom(d){if(!vPdf)return;const n=Math.min(Math.max(0,vZoom+d),ZOOMS.length-1);if(n!==vZoom){vZoom=n;viewerRender().catch(e=>alert('表示できませんでした：'+e.message))}}
-function viewerText(){const t=$('vtext');t.classList.toggle('hide');if(!t.classList.contains('hide'))t.scrollIntoView({block:'start'})}
+function viewerText(){if($('viewer').classList.contains('split'))return;const t=$('vtext');t.classList.toggle('hide');if(!t.classList.contains('hide'))t.scrollIntoView({block:'start'})}
 async function viewerClose(silent){
  if(vTask){try{vTask.cancel()}catch(e){}vTask=null}
  if(vPdf){await vPdf.destroy().catch(()=>{});vPdf=null}
@@ -375,6 +376,99 @@ $('attachFile').addEventListener('change',async e=>{
 });
 document.addEventListener('click',e=>{const b=e.target.closest('[data-orig]');if(b)openOriginal(b.dataset.orig,+b.dataset.page||1)});
 
+// ===== v18: 原本ページをAIで読み取る（表をMarkdownで再現／端末内の本文を置き換え） =====
+let vDocId=null,vAi={},vAiBusy=false;
+const AI_SEP=r=>/^\s*\|?[\s:\-|]+\|?\s*$/.test(r)&&r.includes('-');
+const AI_BR=t=>String(t).replace(/<br\s*\/?>/gi,' ／ ');
+function aiToText(md){
+ return AI_BR(md).replace(/\r/g,'').split('\n').filter(l=>!(l.includes('|')&&AI_SEP(l))).map(l=>{
+  l=l.replace(/^\s{0,3}#{1,6}\s+/,'');
+  if(/^\s*\|.*\|\s*$/.test(l))l=l.replace(/^\s*\||\|\s*$/g,'').split('|').map(c=>c.trim()).join('　');
+  return l;
+ }).join('\n').trim();
+}
+function mdToHtml(md){
+ const L=AI_BR(md).replace(/\r/g,'').split('\n'),isRow=l=>/^\s*\|.*\|\s*$/.test(l),isLi=l=>/^\s*[-*・]\s+/.test(l);
+ let o='',i=0;
+ while(i<L.length){
+  const l=L[i];
+  if(isRow(l)){
+   const rows=[];while(i<L.length&&isRow(L[i])){rows.push(L[i]);i++}
+   let h='<div style="overflow:auto"><table class="vt">';
+   rows.forEach((r,k)=>{if(AI_SEP(r))return;const tag=(k===0&&rows[1]&&AI_SEP(rows[1]))?'th':'td';h+='<tr>'+r.trim().replace(/^\||\|$/g,'').split('|').map(c=>`<${tag}>${hlText(c.trim())}</${tag}>`).join('')+'</tr>'});
+   o+=h+'</table></div>';continue;
+  }
+  const hm=l.match(/^\s{0,3}#{1,6}\s+(.*)$/);
+  if(hm){o+=`<h4>${hlText(hm[1])}</h4>`;i++;continue}
+  if(isLi(l)){let u='<ul>';while(i<L.length&&isLi(L[i])){u+='<li>'+hlText(L[i].replace(/^\s*[-*・]\s+/,''))+'</li>';i++}o+=u+'</ul>';continue}
+  if(!l.trim()){i++;continue}
+  o+='<p>'+hlText(l)+'</p>';i++;
+ }
+ return o;
+}
+function renderVText(){
+ const el=$('vtext'),ai=vAi[vPage];
+ if(ai)el.innerHTML=`<div class="hint"><b>AI読み取り結果（要確認）</b>　${escapeHtml(ai.model||'')}</div>`+mdToHtml(ai.md)+'<div class="row" style="margin-top:10px"><button class="small" onclick="viewerUndoAI()">端末内OCRの結果に戻す</button></div>';
+ else el.innerHTML=vPageTexts[vPage]?'<div class="hint">端末内OCRの結果</div>'+hlText(vPageTexts[vPage]):'（このページの読み取り文字はありません）';
+}
+const availW=()=>($('viewer').classList.contains('split')?$('vleft'):$('vscroll')).clientWidth;
+function viewerSplit(){const v=$('viewer');v.classList.toggle('split');const on=v.classList.contains('split');$('vtext').classList.toggle('hide',!on);viewerRender().catch(e=>alert('表示できませんでした：'+e.message))}
+function bumpCount(){localStorage.setItem(monthKey(),String((+localStorage.getItem(monthKey())||0)+1))}
+function addTokens(i,o){const k='ss_api_tok_'+new Date().toISOString().slice(0,7);let t={i:0,o:0};try{t=JSON.parse(localStorage.getItem(k)||'')||t}catch(e){}t.i=(t.i||0)+i;t.o=(t.o||0)+o;localStorage.setItem(k,JSON.stringify(t))}
+function tokText(){try{const t=JSON.parse(localStorage.getItem('ss_api_tok_'+new Date().toISOString().slice(0,7))||'');return t?` ／ 入力${t.i}・出力${t.o}トークン`:''}catch(e){return ''}}
+async function applyAiPage(p,md,model){
+ const d=(await getAll('docs')).find(x=>x.id===vDocId);if(!d)throw Error('資料が見つかりません');
+ const clean=aiToText(md),arr=String(d.text||'').split(/(【\d+ページ】)/);let found=false,orig='';
+ for(let i=1;i+1<arr.length;i+=2)if(+arr[i].match(/\d+/)[0]===p){orig=arr[i+1];arr[i+1]='\n'+clean+'\n\n';found=true}
+ if(!found)arr.push(`【${p}ページ】`,'\n'+clean+'\n\n');
+ d.aiPages=d.aiPages||{};
+ d.aiPages[p]={md,model,at:Date.now(),ocr:d.aiPages[p]?d.aiPages[p].ocr:orig};
+ d.text=arr.join('');
+ d.note=(d.note||'').replace(/／AI読み取り\d+ページ/,'')+`／AI読み取り${Object.keys(d.aiPages).length}ページ`;
+ await put('docs',d);vAi=d.aiPages;vPageTexts[p]=clean;if(vPage===p)renderVText();
+}
+async function viewerUndoAI(){
+ if(!confirm('このページを、端末内OCRの読み取り結果に戻しますか？（AIの読み取り結果は破棄されます）'))return;
+ const p=vPage,d=(await getAll('docs')).find(x=>x.id===vDocId);if(!d||!d.aiPages||!d.aiPages[p])return;
+ const arr=String(d.text||'').split(/(【\d+ページ】)/);
+ for(let i=1;i+1<arr.length;i+=2)if(+arr[i].match(/\d+/)[0]===p)arr[i+1]=d.aiPages[p].ocr||'\n';
+ d.text=arr.join('');delete d.aiPages[p];
+ const n=Object.keys(d.aiPages).length;d.note=(d.note||'').replace(/／AI読み取り\d+ページ/,'')+(n?`／AI読み取り${n}ページ`:'');
+ await put('docs',d);vAi=d.aiPages;
+ const parts=d.text.split(/【(\d+)ページ】/);vPageTexts={};for(let i=1;i+1<parts.length;i+=2)vPageTexts[+parts[i]]=parts[i+1].trim();
+ renderVText();
+}
+const AI_SYSTEM='あなたは文書の文字起こしアシスタントです。画像のページの内容を、日本語のMarkdownで正確に書き起こしてください。\n・表は必ずMarkdownの表で出力してください。結合セルは、近い列に内容を書いてください。\n・カレンダー形式の予定表は、日付ごとに1行（例：| 10/16(金) | 点字講習会 |）にして、日付と曜日と行事を同じ行に並べてください。月や年度が見出しにあれば、それも書いてください。\n・見出しと箇条書きは、構造を保ってください。\n・読めない部分は推測せず、[判読不能]と書いてください。\n・日付と数字は特に正確に書いてください。\n・説明や前置きは書かず、書き起こしだけを出力してください。';
+async function viewerAI(){
+ if(!vPdf||vAiBusy)return;
+ const key=localStorage.getItem('ss_api_key')||'';
+ if(!key){alert('先に「質問・予定抽出」タブの「AI接続の設定」でAPIキーを保存してください。');return}
+ const model=localStorage.getItem('ss_api_model_vision')||localStorage.getItem('ss_api_model')||'claude-haiku-5-5',p=vPage;
+ if(!confirm(`このページ（${p}ページ）の画像を、AnthropicのAPI（${model}）へ送信して、文字を読み取ります。\n\n費用の目安は、1ページ1円未満です（実際の使用量は、読み取り後に表示します）。\n個人情報を含む資料は、この機能に使わない運用になっていることを確認してください。\n\n送信しますか？`))return;
+ vAiBusy=true;$('vai').disabled=true;const st=$('vaistatus');st.textContent='画像を準備しています…';
+ try{
+  const page=await vPdf.getPage(p),b=page.getViewport({scale:1}),vp=page.getViewport({scale:1568/Math.max(b.width,b.height)});
+  const cv=document.createElement('canvas');cv.width=Math.ceil(vp.width);cv.height=Math.ceil(vp.height);
+  await page.render({canvasContext:cv.getContext('2d',{alpha:false}),viewport:vp,background:'#ffffff'}).promise;
+  const b64=cv.toDataURL('image/jpeg',0.9).split(',')[1];cv.width=0;cv.height=0;
+  st.textContent='AIが読み取っています…（数十秒かかることがあります）';
+  const ac=new AbortController(),to=setTimeout(()=>ac.abort(),120000);let res,data;
+  try{
+   res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',signal:ac.signal,headers:{'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model,max_tokens:4096,system:AI_SYSTEM,messages:[{role:'user',content:[{type:'image',source:{type:'base64',media_type:'image/jpeg',data:b64}},{type:'text',text:'このページを書き起こしてください。'}]}]})});
+   data=await res.json().catch(()=>({}));
+  }finally{clearTimeout(to)}
+  if(!res.ok){st.textContent=(res.status===401?'APIキーが正しくありません。':res.status===429?'利用制限に達しました。しばらくしてからやり直してください。':'読み取れませんでした。')+' '+(data?.error?.message||('エラー '+res.status));return}
+  const md=(data.content||[]).filter(x=>x.type==='text').map(x=>x.text).join('\n').trim();
+  if(!md){st.textContent='読み取り結果が空でした。';return}
+  await applyAiPage(p,md,model);
+  const u=data.usage||{},inT=u.input_tokens||0,outT=u.output_tokens||0;bumpCount();addTokens(inT,outT);
+  const est=model==='claude-haiku-5-5'?`・約${((inT*0.10+outT*0.50)/1e6*150).toFixed(2)}円（概算）`:'';
+  st.textContent=`${p}ページを読み取りました（入力${inT}・出力${outT}トークン${est}）`+(data.stop_reason==='max_tokens'?' ⚠出力が長すぎて途中で切れています':'')+'。内容を原本と見比べてください。';
+  if(vPage===p&&!$('viewer').classList.contains('split'))$('vtext').classList.remove('hide');
+ }catch(e){st.textContent=e&&e.name==='AbortError'?'120秒以内に回答がなく、中止しました。':'読み取れませんでした：'+(e&&e.message||e)}
+ finally{vAiBusy=false;$('vai').disabled=false}
+}
+
 async function versionDiag(){
  const el=document.getElementById('verDiag');if(!el)return;
  let sw='SW未使用',cache='なし';
@@ -383,7 +477,7 @@ async function versionDiag(){
   if(window.caches){const k=(await caches.keys()).filter(x=>x.startsWith('school-search-'));cache=k.join(',')||'なし'}
  }catch(e){}
  const html=window.__HTML_VER||'?';
- const ok=html===JS_VER&&cache==='school-search-v17';
- el.textContent=`画面v${html} / JS v${JS_VER} / ${sw} / キャッシュ ${cache} → `+(ok?'✅ 最新(v17)':'⚠ 不一致：一度アプリを完全に閉じて開き直してください');
+ const ok=html===JS_VER&&cache==='school-search-v18';
+ el.textContent=`画面v${html} / JS v${JS_VER} / ${sw} / キャッシュ ${cache} → `+(ok?'✅ 最新(v18)':'⚠ 不一致：一度アプリを完全に閉じて開き直してください');
 }
 versionDiag();
