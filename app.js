@@ -1,5 +1,5 @@
 'use strict';
-const JS_VER='12';
+const JS_VER='13';
 let db;
 const $=id=>document.getElementById(id);
 const escapeHtml=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -102,7 +102,19 @@ async function extractPdf(buffer){
 function garbledPdf(d){return d.name?.toLowerCase().endsWith('.pdf')&&(d.note||'').includes('簡易対応')}
 async function markOldPdfs(){for(const d of await getAll('docs')){if(garbledPdf(d)){d.text='';d.note='旧版の簡易解析PDFです。原本を再登録してください。';await put('docs',d)}}}
 $('files').addEventListener('change',async e=>{const files=[...e.target.files];let ok=0,fail=[];$('importStatus').textContent='読み込み中…';for(const f of files){try{const r=await extract(f);if(f.name.toLowerCase().endsWith('.pdf')&&!r.text.replace(/【\d+ページ】/g,'').trim())throw Error('PDF本文が空です');await put('docs',{id:f.name+'|'+f.size+'|'+f.lastModified,name:f.name,size:f.size,modified:f.lastModified,added:Date.now(),text:r.text,note:r.note});ok++}catch(err){fail.push(f.name+'：'+err.message)}}$('importStatus').textContent=`${ok}件保存しました。`+(fail.length?' 失敗: '+fail.join(' / '):'');e.target.value='';renderDocs()});
-async function renderDocs(){if(!db)return;const q=$('query').value.trim().toLowerCase().split(/\s+/).filter(Boolean),docs=await getAll('docs');docs.sort((a,b)=>b.added-a.added);const norm=x=>String(x||'').normalize('NFKC').toLowerCase().replace(/\s+/g,'');const found=docs.filter(d=>{const hay=norm(d.name+d.text);return q.every(w=>hay.includes(norm(w)))});$('docsList').innerHTML=`<p class="hint">${found.length}件表示 / 保存済み${docs.length}件</p>`+found.map(d=>{const ix=q.length?(d.text||'').toLowerCase().indexOf(q[0]):-1,snippet=ix>=0?d.text.slice(Math.max(0,ix-65),ix+150):(d.text||'').slice(0,180);return `<div class="item"><div class="name">${escapeHtml(d.name)}</div><div class="meta">${new Date(d.added).toLocaleString('ja-JP')} · ${Math.ceil(d.size/1024)}KB ${d.note?'<span class="pill">抽出情報あり</span>':''}</div><div class="snippet">${escapeHtml(snippet||d.note||'本文なし')}</div><div class="row"><button class="small" data-action="view" data-id="${escapeHtml(d.id)}">本文を見る</button><button class="small danger" data-action="delete" data-id="${escapeHtml(d.id)}">削除</button></div></div>`}).join('')}
+function fuzzyFind(hay,w){const L=w.length,maxMis=L>=7?2:L>=4?1:0;if(!maxMis)return -1;for(let i=0;i+L<=hay.length;i++){let m=0;for(let j=0;j<L;j++){if(hay.charCodeAt(i+j)!==w.charCodeAt(j)&&++m>maxMis)break}if(m<=maxMis)return i}return -1}
+async function renderDocs(){if(!db)return;
+ const norm=x=>String(x||'').normalize('NFKC').toLowerCase().replace(/\s+/g,'');
+ const ws=$('query').value.trim().split(/\s+/).map(norm).filter(Boolean),docs=await getAll('docs');docs.sort((a,b)=>b.added-a.added);
+ let exact=[],fuzzy=[];
+ if(!ws.length)exact=docs;
+ else for(const d of docs){const hay=norm(d.name+d.text);let ok=true,all=true;for(const w of ws){if(hay.includes(w))continue;all=false;if(fuzzyFind(hay,w)<0){ok=false;break}}if(ok)(all?exact:fuzzy).push(d)}
+ const snip=d=>{if(!ws.length)return(d.text||'').slice(0,180);const tx=norm(d.text);let ix=-1,len=0;for(const w of ws){let i=tx.indexOf(w);if(i<0)i=fuzzyFind(tx,w);if(i>=0){ix=i;len=w.length;break}}if(ix<0)return(d.text||'').slice(0,180);return tx.slice(Math.max(0,ix-40),ix)+'【'+tx.slice(ix,ix+len)+'】'+tx.slice(ix+len,ix+len+120)};
+ const card=d=>`<div class="item"><div class="name">${escapeHtml(d.name)}</div><div class="meta">${new Date(d.added).toLocaleString('ja-JP')} · ${Math.ceil(d.size/1024)}KB ${d.note?'<span class="pill">抽出情報あり</span>':''}</div><div class="snippet">${escapeHtml(snip(d)||d.note||'本文なし')}</div><div class="row"><button class="small" data-action="view" data-id="${escapeHtml(d.id)}">本文を見る</button><button class="small danger" data-action="delete" data-id="${escapeHtml(d.id)}">削除</button></div></div>`;
+ const total=exact.length+fuzzy.length;
+ const head=!ws.length?`${docs.length}件表示 / 保存済み${docs.length}件`:total?`<b>${total}件ヒット</b>（完全一致${exact.length}件・あいまい一致${fuzzy.length}件）/ 保存済み${docs.length}件`:`<b>ヒットなし</b>（保存済み${docs.length}件）`;
+ $('docsList').innerHTML=`<p class="hint">${head}</p>`+exact.map(card).join('')+(fuzzy.length?`<p class="hint">▼ あいまい一致（OCRの誤字を含む可能性。【】が一致した箇所）</p>`+fuzzy.map(card).join(''):'');
+}
 $('docsList').addEventListener('click',async e=>{const b=e.target.closest('button[data-action]');if(!b)return;const id=b.dataset.id;if(b.dataset.action==='delete'){if(confirm('この資料を削除しますか？')){await del('docs',id);renderDocs()}}else{const r=store('docs').get(id);r.onsuccess=()=>{const d=r.result;if(d)alert((d.text||d.note||'本文なし').slice(0,12000))}}});
 async function addEvent(){const date=$('eventDate').value,title=$('eventTitle').value.trim();if(!date||!title){$('eventStatus').textContent='日付と予定名を入力してください';return}await put('events',{id:crypto.randomUUID(),date,time:$('eventTime').value,title,note:$('eventNote').value});$('eventStatus').textContent='保存しました';$('eventTitle').value='';$('eventNote').value='';renderEvents()}
 async function renderEvents(){if(!db)return;const q=$('eventQuery').value.trim().toLowerCase(),all=await getAll('events');all.sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time));$('eventsList').innerHTML=all.filter(x=>(x.date+' '+x.title+' '+x.note).toLowerCase().includes(q)).map(x=>`<div class="item"><div class="name">${escapeHtml(x.date)} ${escapeHtml(x.time)}　${escapeHtml(x.title)}</div><div class="snippet">${escapeHtml(x.note)}</div><div class="row"><button class="small" data-action="calendar" data-id="${escapeHtml(x.id)}">カレンダーに追加</button><button class="small danger" data-action="delete" data-id="${escapeHtml(x.id)}">削除</button></div></div>`).join('')||'<p class="hint">予定はありません。</p>'}
@@ -122,7 +134,7 @@ async function versionDiag(){
   if(window.caches){const k=(await caches.keys()).filter(x=>x.startsWith('school-search-'));cache=k.join(',')||'なし'}
  }catch(e){}
  const html=window.__HTML_VER||'?';
- const ok=html===JS_VER&&cache==='school-search-v12';
- el.textContent=`画面v${html} / JS v${JS_VER} / ${sw} / キャッシュ ${cache} → `+(ok?'✅ 最新(v12)':'⚠ 不一致：一度アプリを完全に閉じて開き直してください');
+ const ok=html===JS_VER&&cache==='school-search-v13';
+ el.textContent=`画面v${html} / JS v${JS_VER} / ${sw} / キャッシュ ${cache} → `+(ok?'✅ 最新(v13)':'⚠ 不一致：一度アプリを完全に閉じて開き直してください');
 }
 versionDiag();
