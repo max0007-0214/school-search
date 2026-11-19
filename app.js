@@ -1,5 +1,5 @@
 'use strict';
-const JS_VER='18';
+const JS_VER='19';
 let db;
 const $=id=>document.getElementById(id);
 const escapeHtml=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -120,7 +120,7 @@ async function renderDocs(){if(!db)return;if($('bodyToggle'))$('bodyToggle').tex
 }
 $('docsList').addEventListener('click',async e=>{const b=e.target.closest('button[data-action]');if(!b)return;const id=b.dataset.id,act=b.dataset.action;if(act==='attach'){startAttach(id);return}if(act==='orig'){openOriginal(id,+b.dataset.page||1,b.dataset.hits,$('query').value.trim().split(/\s+/).filter(Boolean));return}if(act==='delete'){if(confirm('この資料を削除しますか？（保存した原本も削除されます）')){await del('docs',id);await del('files',id).catch(()=>{});renderDocs()}return}const r=store('docs').get(id);r.onsuccess=()=>{const d=r.result;if(d)alert((d.text||d.note||'本文なし').slice(0,12000))}});
 async function addEvent(){const date=$('eventDate').value,title=$('eventTitle').value.trim();if(!date||!title){$('eventStatus').textContent='日付と予定名を入力してください';return}await put('events',{id:crypto.randomUUID(),date,time:$('eventTime').value,title,note:$('eventNote').value});$('eventStatus').textContent='保存しました';$('eventTitle').value='';$('eventNote').value='';renderEvents()}
-async function renderEvents(){if(!db)return;const q=$('eventQuery').value.trim().toLowerCase(),all=await getAll('events');all.sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time));$('eventsList').innerHTML=all.filter(x=>(x.date+' '+x.title+' '+x.note).toLowerCase().includes(q)).map(x=>`<div class="item"><div class="name">${escapeHtml(x.date)} ${escapeHtml(x.time)}　${escapeHtml(x.title)}</div><div class="snippet">${escapeHtml(x.note)}</div><div class="row"><button class="small" data-action="calendar" data-id="${escapeHtml(x.id)}">カレンダーに追加</button><button class="small danger" data-action="delete" data-id="${escapeHtml(x.id)}">削除</button></div></div>`).join('')||'<p class="hint">予定はありません。</p>'}
+async function renderEvents(){if(!db)return;const q=$('eventQuery').value.trim().toLowerCase(),all=await getAll('events');evCache=all.slice();all.sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time));$('eventsList').innerHTML=all.filter(x=>(x.date+' '+x.title+' '+x.note).toLowerCase().includes(q)).map(x=>`<div class="item"><div class="name">${escapeHtml(x.date)} ${escapeHtml(x.time)}　${escapeHtml(x.title)}</div><div class="snippet">${escapeHtml(x.note)}</div><div class="row"><button class="small" data-action="calendar" data-id="${escapeHtml(x.id)}">カレンダーに追加</button><button class="small danger" data-action="delete" data-id="${escapeHtml(x.id)}">削除</button></div></div>`).join('')||'<p class="hint">予定はありません。</p>'}
 $('eventsList').addEventListener('click',async e=>{const b=e.target.closest('button[data-action]');if(!b)return;const r=store('events').get(b.dataset.id);r.onsuccess=async()=>{const x=r.result;if(!x)return;if(b.dataset.action==='delete'){if(confirm('予定を削除しますか？')){await del('events',x.id);renderEvents()}}else calendarFile(x)}});
 function download(name,content,type){const url=URL.createObjectURL(new Blob([content],{type})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),3000)}
 function calendarFile(x){const stamp=x.date.replaceAll('-','')+'T'+(x.time||'09:00').replace(':','')+'00',start=new Date(x.date+'T'+(x.time||'09:00')+':00'),end=new Date(start.getTime()+3600000),fmt=d=>{const z=n=>String(n).padStart(2,'0');return d.getFullYear()+z(d.getMonth()+1)+z(d.getDate())+'T'+z(d.getHours())+z(d.getMinutes())+'00'},esc=s=>String(s||'').replace(/\\/g,'\\\\').replace(/\n/g,'\\n').replace(/,/g,'\\,').replace(/;/g,'\\;');download('予定-'+x.date+'.ics',`BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//SchoolSearch//JP\r\nBEGIN:VEVENT\r\nUID:${x.id}@school-search.local\r\nDTSTAMP:${new Date().toISOString().replace(/[-:]/g,'').replace(/\.\d+/,'')}\r\nDTSTART:${stamp}\r\nDTEND:${fmt(end)}\r\nSUMMARY:${esc(x.title)}\r\nDESCRIPTION:${esc(x.note)}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n`,'text/calendar')}
@@ -469,6 +469,51 @@ async function viewerAI(){
  finally{vAiBusy=false;$('vai').disabled=false}
 }
 
+// ===== v19: 予定の一括書き出し（通知つき .ics） =====
+// ==ICS-START==
+const icsEsc=s=>String(s||'').replace(/\\/g,'\\\\').replace(/\r?\n/g,'\\n').replace(/,/g,'\\,').replace(/;/g,'\\;');
+function icsFold(line){const enc=new TextEncoder(),out=[];let cur='',len=0;for(const ch of line){const b=enc.encode(ch).length;if(len+b>73){out.push(cur);cur=' '+ch;len=1+b}else{cur+=ch;len+=b}}out.push(cur);return out.join('\r\n')}
+const z2=n=>String(n).padStart(2,'0');
+const icsLocal=d=>d.getFullYear()+z2(d.getMonth()+1)+z2(d.getDate())+'T'+z2(d.getHours())+z2(d.getMinutes())+'00';
+const icsUtc=d=>d.getUTCFullYear()+z2(d.getUTCMonth()+1)+z2(d.getUTCDate())+'T'+z2(d.getUTCHours())+z2(d.getUTCMinutes())+z2(d.getUTCSeconds())+'Z';
+function buildIcs(events,opt){
+ const L=['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//SchoolSearch//JP','CALSCALE:GREGORIAN','X-WR-CALNAME:校内予定'],stamp=icsUtc(new Date());
+ for(const x of events){
+  const [y,mo,d]=String(x.date||'').split('-').map(Number);if(!y||!mo||!d)continue;
+  const timed=/^\d{1,2}:\d{2}$/.test(x.time||''),title=x.title||'(無題)';
+  let start=null;
+  L.push('BEGIN:VEVENT',`UID:${x.id}@school-search.local`,`DTSTAMP:${stamp}`);
+  if(timed){const [h,mi]=x.time.split(':').map(Number);start=new Date(y,mo-1,d,h,mi);L.push('DTSTART:'+icsLocal(start),'DTEND:'+icsLocal(new Date(start.getTime()+3600000)))}
+  else{const nx=new Date(y,mo-1,d+1);L.push(`DTSTART;VALUE=DATE:${y}${z2(mo)}${z2(d)}`,`DTEND;VALUE=DATE:${nx.getFullYear()}${z2(nx.getMonth()+1)}${z2(nx.getDate())}`)}
+  L.push('SUMMARY:'+icsEsc(title));
+  if(x.note)L.push('DESCRIPTION:'+icsEsc(x.note));
+  const al=(when,label)=>{if(start&&when>=start)return;L.push('BEGIN:VALARM','ACTION:DISPLAY','DESCRIPTION:'+icsEsc(label+'：'+title),'TRIGGER;VALUE=DATE-TIME:'+icsUtc(when),'END:VALARM')};
+  if(opt.prev){const [h,mi]=opt.prev.split(':').map(Number);al(new Date(y,mo-1,d-1,h,mi),'明日の予定')}
+  if(opt.day){const [h,mi]=opt.day.split(':').map(Number);al(new Date(y,mo-1,d,h,mi),'今日の予定')}
+  if(opt.start&&timed)L.push('BEGIN:VALARM','ACTION:DISPLAY','DESCRIPTION:'+icsEsc('まもなく：'+title),'TRIGGER:-PT30M','END:VALARM');
+  L.push('END:VEVENT');
+ }
+ L.push('END:VCALENDAR');
+ return L.map(icsFold).join('\r\n')+'\r\n';
+}
+// ==ICS-END==
+let evCache=[];
+(function loadIcsOpts(){try{const o=JSON.parse(localStorage.getItem('ss_ics_opt')||'null');if(!o)return;$('alPrev').checked=!!o.pe;$('alPrevT').value=o.p||'17:00';$('alDay').checked=!!o.de;$('alDayT').value=o.d||'07:00';$('alStart').checked=!!o.s;$('alFuture').checked=!!o.f}catch(e){}})();
+async function exportIcs(){
+ const st=$('icsStatus');let list=evCache.slice();
+ const today=new Date().toLocaleDateString('sv-SE');
+ if($('alFuture').checked)list=list.filter(x=>x.date>=today);
+ list.sort((a,b)=>(a.date+(a.time||'')).localeCompare(b.date+(b.time||'')));
+ if(!list.length){st.textContent='書き出す予定がありません。';return}
+ const opt={prev:$('alPrev').checked?($('alPrevT').value||'17:00'):null,day:$('alDay').checked?($('alDayT').value||'07:00'):null,start:$('alStart').checked};
+ localStorage.setItem('ss_ics_opt',JSON.stringify({pe:$('alPrev').checked,p:$('alPrevT').value,de:$('alDay').checked,d:$('alDayT').value,s:$('alStart').checked,f:$('alFuture').checked}));
+ const text=buildIcs(list,opt),name='校内予定-'+today+'.ics',file=new File([text],name,{type:'text/calendar'});
+ const info=`${list.length}件の予定を書き出しました。`+(opt.prev?`前日${opt.prev}・`:'')+(opt.day?`当日${opt.day}・`:'')+(opt.start?'開始30分前':'')+'に通知します。';
+ try{if(navigator.canShare&&navigator.canShare({files:[file]})){await navigator.share({files:[file],title:'校内予定'});st.textContent=info+' 共有画面で「カレンダー」を選ぶか、「ファイルに保存」してから開いてください。';return}}
+ catch(e){if(e&&e.name==='AbortError'){st.textContent='中止しました。';return}}
+ download(name,text,'text/calendar');st.textContent=info+' 保存したファイルを開き、「すべてを追加」を押してください。';
+}
+
 async function versionDiag(){
  const el=document.getElementById('verDiag');if(!el)return;
  let sw='SW未使用',cache='なし';
@@ -477,7 +522,7 @@ async function versionDiag(){
   if(window.caches){const k=(await caches.keys()).filter(x=>x.startsWith('school-search-'));cache=k.join(',')||'なし'}
  }catch(e){}
  const html=window.__HTML_VER||'?';
- const ok=html===JS_VER&&cache==='school-search-v18';
- el.textContent=`画面v${html} / JS v${JS_VER} / ${sw} / キャッシュ ${cache} → `+(ok?'✅ 最新(v18)':'⚠ 不一致：一度アプリを完全に閉じて開き直してください');
+ const ok=html===JS_VER&&cache==='school-search-v19';
+ el.textContent=`画面v${html} / JS v${JS_VER} / ${sw} / キャッシュ ${cache} → `+(ok?'✅ 最新(v19)':'⚠ 不一致：一度アプリを完全に閉じて開き直してください');
 }
 versionDiag();
